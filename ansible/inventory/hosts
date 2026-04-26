@@ -1,0 +1,13 @@
+[webservers]
+web01 ansible_host=192.168.1.101 ansible_user=devops
+web02 ansible_host=192.168.1.102 ansible_user=devops
+
+[dbservers]
+db01 ansible_host=192.168.1.201 ansible_user=devops
+
+[monitoring]
+mon01 ansible_host=192.168.1.50 ansible_user=devops
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_private_key_file=~/.ssh/devops_key

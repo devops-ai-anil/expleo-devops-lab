@@ -1,0 +1,133 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  APP_NAME: expleo-app
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ansible Lint
+        uses: ansible/ansible-lint-action@main
+        with:
+          path: ansible/
+
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: linux/scripts
+
+      - name: Run unit tests
+        run: make test-unit
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: security-scan
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.APP_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Login to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ansible
+        run: pip install ansible
+
+      - name: Write vault password
+        run: echo "${{ secrets.ANSIBLE_VAULT_PASS }}" > .vault_pass
+
+      - name: Deploy to staging
+        run: |
+          ansible-playbook ansible/playbooks/site.yml \
+            -i ansible/inventory/hosts \
+            --limit staging \
+            --vault-password-file .vault_pass \
+            -e app_version=${{ github.sha }}
+
+      - name: Smoke test
+        run: |
+          sleep 10
+          curl -sf https://staging.internal/health
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: production          # requires manual approval in GitHub UI
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ansible
+        run: pip install ansible
+
+      - name: Write vault password
+        run: echo "${{ secrets.ANSIBLE_VAULT_PASS }}" > .vault_pass
+
+      - name: Deploy to production (rolling)
+        run: |
+          ansible-playbook ansible/playbooks/site.yml \
+            -i ansible/inventory/hosts \
+            --limit production \
+            --vault-password-file .vault_pass \
+            -e app_version=${{ github.sha }}
+
+      - name: Cleanup vault password file
+        if: always()
+        run: rm -f .vault_pass

@@ -1,0 +1,73 @@
+---
+# Playbook: Deploy Nginx with SSL — zero-downtime rolling update
+# Usage: ansible-playbook nginx-deploy.yml -i ../inventory/hosts --check --diff
+- name: Deploy Nginx across web fleet
+  hosts: webservers
+  become: true
+  serial: 1                          # rolling — one host at a time
+  max_fail_percentage: 0             # abort immediately on any failure
+
+  vars:
+    nginx_version: "1.24.0"
+    ssl_cert_path: /etc/ssl/certs/app.crt
+    ssl_key_path: /etc/ssl/private/app.key
+    http_port: 80
+    https_port: 443
+
+  handlers:
+    - name: reload nginx
+      service:
+        name: nginx
+        state: reloaded
+
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+
+  tasks:
+    - name: Install nginx
+      package:
+        name: "nginx"
+        state: present
+
+    - name: Ensure nginx is enabled and started
+      service:
+        name: nginx
+        enabled: true
+        state: started
+
+    - name: Deploy nginx main config
+      template:
+        src: ../templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: "0644"
+        validate: "nginx -t -c %s"
+      notify: reload nginx
+
+    - name: Deploy site virtualhost
+      template:
+        src: ../templates/vhost.conf.j2
+        dest: /etc/nginx/conf.d/app.conf
+        mode: "0644"
+        validate: "nginx -t -c /etc/nginx/nginx.conf"
+      notify: reload nginx
+
+    - name: Open firewall for HTTP and HTTPS
+      firewalld:
+        service: "{{ item }}"
+        permanent: true
+        state: enabled
+        immediate: true
+      loop:
+        - http
+        - https
+
+    - name: Verify nginx responds on port {{ https_port }}
+      uri:
+        url: "https://{{ ansible_host }}"
+        validate_certs: false
+        status_code: 200
+      delegate_to: localhost

@@ -1,0 +1,92 @@
+---
+# Playbook: CIS-aligned server hardening
+# Interview scenario: "Harden a fresh RHEL 8 server for production"
+- name: Security hardening baseline
+  hosts: all
+  become: true
+
+  vars:
+    sshd_settings:
+      PermitRootLogin: "no"
+      PasswordAuthentication: "no"
+      MaxAuthTries: "3"
+      Protocol: "2"
+      X11Forwarding: "no"
+      ClientAliveInterval: "300"
+      ClientAliveCountMax: "2"
+      AllowAgentForwarding: "no"
+
+  handlers:
+    - name: restart sshd
+      service:
+        name: sshd
+        state: restarted
+
+    - name: reload firewalld
+      service:
+        name: firewalld
+        state: reloaded
+
+  tasks:
+    - name: Harden sshd_config settings
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?{{ item.key }}"
+        line: "{{ item.key }} {{ item.value }}"
+        backup: true
+      loop: "{{ sshd_settings | dict2items }}"
+      notify: restart sshd
+
+    - name: Set password aging policy
+      lineinfile:
+        path: /etc/login.defs
+        regexp: "^{{ item.key }}"
+        line: "{{ item.key }}\t{{ item.value }}"
+      loop:
+        - { key: PASS_MAX_DAYS, value: "90" }
+        - { key: PASS_MIN_DAYS, value: "7" }
+        - { key: PASS_WARN_AGE, value: "14" }
+
+    - name: Disable unused services
+      service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - bluetooth
+        - cups
+        - avahi-daemon
+      ignore_errors: true          # service may not exist on all distros
+
+    - name: Enable and configure firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: Allow only SSH through firewall by default
+      firewalld:
+        service: ssh
+        zone: public
+        permanent: true
+        state: enabled
+        immediate: true
+
+    - name: Enable auditd for system call auditing
+      service:
+        name: auditd
+        state: started
+        enabled: true
+
+    - name: Set kernel hardening parameters via sysctl
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_set: true
+        reload: true
+      loop:
+        - { key: net.ipv4.ip_forward, value: "0" }
+        - { key: net.ipv4.conf.all.accept_redirects, value: "0" }
+        - { key: net.ipv4.conf.all.send_redirects, value: "0" }
+        - { key: kernel.randomize_va_space, value: "2" }
+        - { key: fs.suid_dumpable, value: "0" }

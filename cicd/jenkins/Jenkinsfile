@@ -1,0 +1,153 @@
+// Declarative Pipeline — Full DevOps cycle
+// Covers: Build → Test → Security Scan → Package → Deploy → Verify
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME    = 'expleo-app'
+        DOCKER_REG  = 'registry.internal'
+        IMAGE_TAG   = "${BUILD_NUMBER}-${GIT_COMMIT[0..7]}"
+        ANSIBLE_DIR = 'ansible'
+        VAULT_PASS  = credentials('ansible-vault-password')
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_AUTHOR = sh(returnStdout: true, script: 'git log -1 --format=%an').trim()
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh '''
+                    echo "Building ${APP_NAME}:${IMAGE_TAG}"
+                    docker build -t ${DOCKER_REG}/${APP_NAME}:${IMAGE_TAG} .
+                    docker tag ${DOCKER_REG}/${APP_NAME}:${IMAGE_TAG} ${DOCKER_REG}/${APP_NAME}:latest
+                '''
+            }
+        }
+
+        stage('Test') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        sh 'make test-unit'
+                    }
+                    post {
+                        always {
+                            junit 'reports/unit/*.xml'
+                        }
+                    }
+                }
+                stage('Lint & Static Analysis') {
+                    steps {
+                        sh '''
+                            ansible-lint ${ANSIBLE_DIR}/playbooks/
+                            shellcheck linux/scripts/*.sh
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                sh '''
+                    # Scan Docker image for CVEs
+                    trivy image --exit-code 1 --severity HIGH,CRITICAL \
+                        ${DOCKER_REG}/${APP_NAME}:${IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('Push Artifact') {
+            when {
+                branch 'main'
+            }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'docker-registry',
+                        usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login ${DOCKER_REG} -u "$DOCKER_USER" --password-stdin
+                        docker push ${DOCKER_REG}/${APP_NAME}:${IMAGE_TAG}
+                        docker push ${DOCKER_REG}/${APP_NAME}:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Staging') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    echo "${VAULT_PASS}" > /tmp/.vaultpass
+                    ansible-playbook ${ANSIBLE_DIR}/playbooks/site.yml \
+                        -i ${ANSIBLE_DIR}/inventory/hosts \
+                        --limit staging \
+                        --vault-password-file /tmp/.vaultpass \
+                        -e app_version=${IMAGE_TAG}
+                    rm -f /tmp/.vaultpass
+                '''
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                sh '''
+                    sleep 10
+                    curl -sf http://staging.internal/health || exit 1
+                    echo "Smoke test passed"
+                '''
+            }
+        }
+
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            input {
+                message "Deploy ${IMAGE_TAG} to PRODUCTION?"
+                ok "Deploy"
+                submitter "ops-team"
+            }
+            steps {
+                sh '''
+                    echo "${VAULT_PASS}" > /tmp/.vaultpass
+                    ansible-playbook ${ANSIBLE_DIR}/playbooks/site.yml \
+                        -i ${ANSIBLE_DIR}/inventory/hosts \
+                        --limit production \
+                        --vault-password-file /tmp/.vaultpass \
+                        -e app_version=${IMAGE_TAG}
+                    rm -f /tmp/.vaultpass
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline SUCCESS — ${APP_NAME}:${IMAGE_TAG} deployed by ${GIT_AUTHOR}"
+        }
+        failure {
+            mail to: 'ops-team@internal',
+                 subject: "FAILED: ${APP_NAME} build #${BUILD_NUMBER}",
+                 body: "Check ${BUILD_URL} for details"
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

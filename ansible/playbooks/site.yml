@@ -1,0 +1,25 @@
+---
+# Master playbook — orchestrates all roles
+- name: Apply baseline hardening to all servers
+  hosts: all
+  become: true
+  vars_files:
+    - ../group_vars/all/vars.yml
+  roles:
+    - common
+    - security-hardening
+
+- name: Deploy web application
+  hosts: webservers
+  become: true
+  vars_files:
+    - ../group_vars/all/vars.yml
+  roles:
+    - nginx
+    - app-deploy
+
+- name: Configure monitoring agents
+  hosts: all
+  become: true
+  roles:
+    - node-exporter

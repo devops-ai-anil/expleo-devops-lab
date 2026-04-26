@@ -1,0 +1,23 @@
+---
+# Common variables for all hosts
+app_user: appuser
+app_group: appgroup
+app_deploy_dir: /opt/app
+
+ntp_servers:
+  - pool.ntp.org
+  - time.google.com
+
+sshd_config:
+  PermitRootLogin: "no"
+  PasswordAuthentication: "no"
+  MaxAuthTries: 3
+  ClientAliveInterval: 300
+
+required_packages:
+  - vim
+  - curl
+  - wget
+  - net-tools
+  - htop
+  - git

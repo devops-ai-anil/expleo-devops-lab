@@ -1,0 +1,68 @@
+---
+# Playbook: Manage users, groups, and SSH keys across fleet
+# Interview scenario: "Create a devops user with sudo, deploy their SSH key"
+- name: User and security management
+  hosts: all
+  become: true
+
+  vars:
+    devops_users:
+      - name: devops
+        groups: wheel
+        shell: /bin/bash
+        sudo_nopasswd: true
+        ssh_key: "ssh-rsa AAAAB3NzaC1... devops@bastion"
+      - name: deployer
+        groups: appgroup
+        shell: /bin/bash
+        sudo_nopasswd: false
+
+    removed_users:
+      - olduser
+      - tempuser
+
+  tasks:
+    - name: Ensure devops group exists
+      group:
+        name: appgroup
+        state: present
+
+    - name: Create devops users
+      user:
+        name: "{{ item.name }}"
+        groups: "{{ item.groups }}"
+        shell: "{{ item.shell }}"
+        create_home: true
+        state: present
+      loop: "{{ devops_users }}"
+
+    - name: Deploy SSH authorized keys
+      authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ item.ssh_key }}"
+        state: present
+        exclusive: true          # removes all other keys — important for security
+      loop: "{{ devops_users }}"
+      when: item.ssh_key is defined
+
+    - name: Grant passwordless sudo where required
+      copy:
+        content: "{{ item.name }} ALL=(ALL) NOPASSWD:ALL\n"
+        dest: "/etc/sudoers.d/{{ item.name }}"
+        mode: "0440"
+        validate: "visudo -cf %s"
+      loop: "{{ devops_users }}"
+      when: item.sudo_nopasswd
+
+    - name: Remove decommissioned users
+      user:
+        name: "{{ item }}"
+        state: absent
+        remove: true             # deletes home dir — deliberate
+      loop: "{{ removed_users }}"
+
+    - name: Lock password-based login for service accounts
+      user:
+        name: "{{ item.name }}"
+        password_lock: true
+      loop: "{{ devops_users }}"
